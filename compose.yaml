@@ -1,0 +1,127 @@
+# Docker Compose配置文件
+
+# 项目名称
+# 容器、网络和数据卷会默认使用 intellikb 作为前缀。
+name: intellikb
+
+# 定义需要启动的容器服务。
+services:
+
+  # PostgreSQL 数据库，同时通过 PGVector 支持向量检索。
+  postgres:
+    # 使用内置 PGVector 扩展的 PostgreSQL 16 镜像。
+    image: pgvector/pgvector:pg16
+
+    # Docker 重启后自动恢复服务；但手动停止后不自动重新启动，除非手动启动。
+    restart: unless-stopped
+
+    # 初始化数据库时使用的配置值，来自根目录 .env 文件。
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    # 将容器的 PostgreSQL 端口映射到本机。
+    # 127.0.0.1 表示仅允许本机访问，不向局域网公开。
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    # 持久化保存数据库数据。即使容器删除，数据仍保留。
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    # 定期检查 PostgreSQL 是否可接受连接。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    # 加入 IntelliKB 内部网络，供后端容器访问。
+    networks:
+      - intellikb-network
+
+  # MongoDB：保存对话和消息历史。
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+
+    # MongoDB 管理员账号，来自 .env。
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+
+    # 仅本机可访问 MongoDB。
+    ports:
+      - "127.0.0.1:27017:27017"
+
+    # 持久化保存 MongoDB 数据。
+    volumes:
+      - mongodb_data:/data/db
+
+    networks:
+      - intellikb-network
+
+  # Redis：用于缓存以及 Celery 异步任务队列。
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+    # 仅本机可访问 Redis。
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    # 持久化保存 Redis 数据。
+    volumes:
+      - redis_data:/data
+
+    # 检查 Redis 是否正常响应。
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - intellikb-network
+
+  # MinIO：开发环境中的文件对象存储。
+  # 生产环境可改为阿里云 OSS 等云对象存储。
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+
+    # 启动对象存储服务，并启用 9001 管理控制台端口。
+    command: server /data --console-address ":9001"
+
+    # MinIO 管理员账号，来自 .env。
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+    # 9000 是文件存储 API，9001 是浏览器管理控制台。
+    # 两者均仅允许本机访问。
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+    # 持久化保存上传的文档。
+    volumes:
+      - minio_data:/data
+
+    networks:
+      - intellikb-network
+
+# 定义持久化数据卷。
+# 执行 docker compose down 不会删除这些数据。
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  minio_data:
+
+# 定义容器内部网络。
+# 后续 FastAPI、Celery、React 容器也会加入该网络。
+networks:
+  intellikb-network:
+    driver: bridge
