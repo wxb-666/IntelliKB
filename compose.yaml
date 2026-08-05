@@ -112,6 +112,55 @@ services:
     networks:
       - intellikb-network
 
+  # FastAPI 后端服务。
+  api:
+    # 使用 backend/Dockerfile 构建后端镜像。
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+
+    # 后端在 Docker 内部访问基础服务时使用服务名，不使用 127.0.0.1。
+    environment:
+      APP_ENV: ${APP_ENV}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017/intellikb?authSource=admin
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+    # 浏览器可通过本机 8000 端口访问 FastAPI。
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # 本地修改 app 中的 Python 文件后，--reload 会自动重启后端。
+    volumes:
+      - ./backend/app:/app/app
+
+    # 等待数据库与 Redis 就绪后再启动 API。
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+      minio:
+        condition: service_started
+
+    # 检查 FastAPI 健康接口是否可用。
+    healthcheck:
+      test: [ "CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - intellikb-network
+
 # 定义持久化数据卷。
 # 执行 docker compose down 不会删除这些数据。
 volumes:
