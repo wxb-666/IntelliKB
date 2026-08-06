@@ -1,4 +1,32 @@
-.idea/
+# 环境变量与密钥
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 本地运行数据与备份
 data/
+backups/
 logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node.js / 前端构建产物
+node_modules/
+dist/
+build/
+coverage/
+
+# IDE 与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
