@@ -161,6 +161,41 @@ services:
     networks:
       - intellikb-network
 
+  # React 前端开发服务。
+  frontend:
+    # 使用 frontend/Dockerfile 构建前端镜像。
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+
+    # 浏览器可通过本机 5173 端口访问 Vite 前端。
+    ports:
+      - "127.0.0.1:5173:5173"
+
+    # 本地修改前端源码后，Vite 会自动热更新。
+    # node_modules 使用独立数据卷，避免宿主机与容器依赖目录互相覆盖。
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+
+    # 等待后端健康后再启动前端，方便后续接入 API。
+    depends_on:
+      api:
+        condition: service_healthy
+
+    # 检查 Vite 开发服务是否可访问。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    networks:
+      - intellikb-network
+
 # 定义持久化数据卷。
 # 执行 docker compose down 不会删除这些数据。
 volumes:
@@ -168,6 +203,7 @@ volumes:
   mongodb_data:
   redis_data:
   minio_data:
+  frontend_node_modules:
 
 # 定义容器内部网络。
 # 后续 FastAPI、Celery、React 容器也会加入该网络。
