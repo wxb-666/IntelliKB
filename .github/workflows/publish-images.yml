@@ -1,0 +1,191 @@
+# 工作流名称：在 GitHub Actions 页面中显示。
+name: Build and publish container images
+
+# 触发条件：PR 用于验证构建，main 分支和版本标签用于发布镜像。
+on:
+  # 当向 main 分支发起 Pull Request 时，仅执行检查和镜像构建，不推送镜像。
+  pull_request:
+    branches:
+      - main
+  # 当代码推送到 main 分支，或推送 v 开头的标签时，构建并发布镜像。
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+# 权限配置：读取仓库代码，并允许向 GitHub Container Registry 写入镜像包。
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # 前端质量检查任务：确保前端依赖、代码规范和生产构建都能通过。
+  frontend-check:
+    name: Frontend check
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        # 后续 run 命令默认在 frontend 目录下执行。
+        working-directory: frontend
+
+    steps:
+      # 拉取当前仓库代码，后续步骤才能读取源码和配置文件。
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 安装 Node.js，并启用 npm 依赖缓存，加快后续流水线执行速度。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 使用 package-lock.json 做确定性安装，避免 CI 与本地依赖版本不一致。
+      - name: Install dependencies
+        run: npm ci
+
+      # 执行前端代码规范检查。
+      - name: Lint
+        run: npm run lint
+
+      # 执行前端构建，确认生产包可以正常生成。
+      - name: Build
+        run: npm run build
+
+  # 后端质量检查任务：确保 Python 依赖可安装，后端代码语法正确。
+  backend-check:
+    name: Backend check
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        # 后续 run 命令默认在 backend 目录下执行。
+        working-directory: backend
+
+    steps:
+      # 拉取当前仓库代码，后续步骤才能读取后端源码。
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 安装后端运行所需的 Python 版本。
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 安装后端依赖。
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 编译检查 app 目录下的 Python 文件，提前发现语法错误。
+      - name: Check Python syntax
+        run: python -m compileall app
+
+  # 后端 API 镜像构建任务：只在后端检查通过后执行。
+  api-image:
+    name: Build API image
+    # 依赖 backend-check，避免语法检查失败时仍继续构建镜像。
+    needs: backend-check
+    runs-on: ubuntu-latest
+
+    steps:
+      # 拉取当前仓库代码，供 Docker 构建读取 backend/Dockerfile 和后端源码。
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 启用 Docker Buildx，支持更强的构建缓存和跨平台构建能力。
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 生成镜像标签和标签元数据，统一管理 main、tag、sha、latest 等版本标识。
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 后端 API 镜像发布到 GitHub Container Registry 的目标地址。
+          images: ghcr.io/wxb-666/intellikb-api
+          # 标签策略：分支名、版本标签、提交哈希；默认分支额外生成 latest。
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 登录 GHCR。PR 事件不登录，因为 PR 只验证构建，不发布镜像。
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 构建后端镜像；PR 只构建验证，push/tag 事件才会推送到 GHCR。
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          # 后端镜像构建上下文，对应 backend/Dockerfile。
+          context: ./backend
+          # Pull Request 时 push=false；main 或 tag 推送时 push=true。
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 使用 GitHub Actions 缓存加速 Docker 镜像构建。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 前端镜像构建任务：只在前端检查通过后执行。
+  frontend-image:
+    name: Build frontend image
+    # 依赖 frontend-check，避免 lint 或 build 失败时仍继续构建镜像。
+    needs: frontend-check
+    runs-on: ubuntu-latest
+
+    steps:
+      # 拉取当前仓库代码，供 Docker 构建读取 frontend/Dockerfile 和前端源码。
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 启用 Docker Buildx，支持更强的构建缓存和跨平台构建能力。
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 生成镜像标签和标签元数据，统一管理 main、tag、sha、latest 等版本标识。
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 前端镜像发布到 GitHub Container Registry 的目标地址。
+          images: ghcr.io/wxb-666/intellikb-frontend
+          # 标签策略：分支名、版本标签、提交哈希；默认分支额外生成 latest。
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 登录 GHCR。PR 事件不登录，因为 PR 只验证构建，不发布镜像。
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 构建前端镜像；PR 只构建验证，push/tag 事件才会推送到 GHCR。
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          # 前端镜像构建上下文，对应 frontend/Dockerfile。
+          context: ./frontend
+          # Pull Request 时 push=false；main 或 tag 推送时 push=true。
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 使用 GitHub Actions 缓存加速 Docker 镜像构建。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
