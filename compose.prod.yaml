@@ -1,0 +1,151 @@
+# 基于 GHCR 镜像的本地运行配置。
+# 本文件与 compose.yaml 使用同一项目名称，因此两者应交替运行，不能同时启动。
+
+# 保持与开发配置相同的项目名称，以复用已有的基础服务容器、网络和数据卷。
+name: intellikb
+
+# 定义完整运行环境所需的容器服务。
+services:
+  # PostgreSQL 数据库，同时通过 PGVector 支持向量检索。
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      # 仅允许本机访问数据库端口。
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # 复用已有的数据卷，切换前后端镜像不会清空数据库数据。
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - intellikb-network
+
+  # MongoDB：保存对话和消息历史。
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      # 仅允许本机访问 MongoDB。
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - intellikb-network
+
+  # Redis：用于缓存以及后续的异步任务队列。
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      # 仅允许本机访问 Redis。
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - intellikb-network
+
+  # MinIO：本地运行时使用的对象存储服务。
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      # 9000 为对象存储 API，9001 为管理控制台，均仅允许本机访问。
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - intellikb-network
+
+  # FastAPI 后端：直接使用 GitHub Container Registry 中发布的镜像。
+  api:
+    # main 适合持续集成后的本地验证；正式部署建议改为 v 版本或 sha 标签以固定版本。
+    image: ghcr.io/wxb-666/intellikb-api:main
+    # 启动时始终检查 GHCR 是否有同一标签的更新镜像。
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV}
+      # Docker 网络内通过服务名访问基础服务，不使用 127.0.0.1。
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017/intellikb?authSource=admin
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      # 浏览器和本机工具通过 8000 端口访问 API。
+      - "127.0.0.1:8000:8000"
+    # 此处不挂载本地 backend/app，确保运行的是 GHCR 镜像内的代码。
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - intellikb-network
+
+  # React 前端：直接使用 GitHub Container Registry 中发布的镜像。
+  frontend:
+    # main 适合持续集成后的本地验证；正式部署建议改为 v 版本或 sha 标签以固定版本。
+    image: ghcr.io/wxb-666/intellikb-frontend:main
+    # 启动时始终检查 GHCR 是否有同一标签的更新镜像。
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      # 浏览器通过本机 5173 端口访问前端。
+      - "127.0.0.1:5173:5173"
+    # 此处不挂载本地 frontend 目录，确保运行的是 GHCR 镜像内的代码。
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - intellikb-network
+
+# 定义持久化数据卷。普通 docker compose down 不会删除这些数据。
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  minio_data:
+
+# 定义 IntelliKB 内部网络，供各容器使用服务名互相访问。
+networks:
+  intellikb-network:
+    driver: bridge
